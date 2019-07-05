@@ -1,0 +1,7 @@
+# Private environment files
+nextcloud-private.env
+site-private.env
+
+# Service-generated directories
+proxy/
+nextcloud/

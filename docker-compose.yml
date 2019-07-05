@@ -1,0 +1,169 @@
+# Home Server Docker Compose Configuration
+# Author: Steve Matsumoto <stephanos.matsumoto@sporic.me>
+
+# Use version 3 syntax for Docker Compose configuration
+version: '3'
+
+services:
+  
+  # Route traffic to and from the appropriate containers using an nginx proxy.
+  #
+  # This service starts an nginx proxy that 
+  proxy:
+    image: jwilder/nginx-proxy:alpine
+    labels:
+      # Tell the Let's Encrypt container to use this container for certificate generation
+      - "com.github.jrcs.letsencrypt_nginx_proxy_companion.nginx_proxy=true"
+    # Since this service should route traffic to/from all other containers, it
+    # should be in all networks defined at the bottom.
+    networks:
+      - nextcloud
+      - site
+    # Expose both ports 80 and 443 to enable access over HTTP and HTTPS, respectively.
+    ports:
+      - 80:80
+      - 443:443
+    volumes:
+      # Define bind mounts for the relevant files used by this service.
+      - ./proxy/conf.d:/etc/nginx/conf.d:rw
+      - ./proxy/vhost.d:/etc/nginx/vhost.d:rw
+      - ./proxy/html:/usr/share/nginx/html:rw
+      - ./proxy/certs:/etc/nginx/certs:ro
+      # Use the host's timezone inside the container.
+      - /etc/localtime:/etc/localtime:ro
+      # This allows the host to communicate with the container.
+      # WARNING: This is insecure and should not be used for high-value
+      # applications. See
+      # https://github.com/jwilder/nginx-proxy#separate-containers for more info.
+      - /var/run/docker.sock:/tmp/docker.sock:ro
+    # Automatically restart the container unless stopped manually.
+    restart: unless-stopped
+
+  # Generate Let's Encrypt certificates for other containers.
+  letsencrypt:
+    image: jrcs/letsencrypt-nginx-proxy-companion
+    depends_on:
+      - proxy
+    # Because this service needs to communicate with other containers when
+    # issuing certificates, include all networks where you want to issue a
+    # certificate for at least one service in the network.
+    networks:
+      - nextcloud
+      - site
+    volumes:
+      # Define bind mounts through which the service makes certificates
+      # available to the nginx reverse proxy.
+      - ./proxy/certs:/etc/nginx/certs:rw
+      - ./proxy/vhost.d:/etc/nginx/vhost.d:rw
+      - ./proxy/html:/usr/share/nginx/html:rw
+      # Use the host's timezone inside the container.
+      - /etc/localtime:/etc/localtime:ro
+      # Allow the service to use the host Docker API.
+      # WARNING: This gives the service root access to your host machine. If
+      # using this in a high-value environment, you should be absolutely sure
+      # that this container (1) is not publicly accessible and (2) does not run
+      # any untrusted Docker commands (e.g., docker exec).
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    # Automatically restart the container unless stopped manually.
+    restart: unless-stopped
+
+  # Manage disk data used by the Nextcloud service.
+  nextcloud-db:
+    # Use MariaDB (with underlying MySQL) as the database.
+    # TODO: change to Postgres at some point
+    image: mariadb
+    networks:
+      - nextcloud
+    volumes:
+      # Use a Docker volume as the MySQL data store
+      - nextcloud-db:/var/lib/mysql
+      # Use the host's timezone inside the container.
+      - /etc/localtime:/etc/localtime:ro
+    env_file:
+      - .env
+    # Automatically restart the container unless stopped manually.
+    restart: unless-stopped
+
+  # Manage in-memory data used by the Nextcloud service.
+  nextcloud-redis:
+    image: redis:alpine
+    networks:
+      - nextcloud
+    volumes:
+      # Use the host's timezone inside the container.
+      - /etc/localtime:/etc/localtime:ro
+    # Automatically restart the container unless stopped manually.
+    restart: unless-stopped
+
+  # Host 
+  nextcloud:
+    image: nextcloud:latest
+    networks:
+      - nextcloud
+    # Ensure the reverse proxy, Let's Encrypt service, and data managers are functional.
+    depends_on:
+      - proxy
+      - letsencrypt
+      - nextcloud-db
+      - nextcloud-redis
+    volumes:
+      # Define the names volumes and bind mounts that hold the files generated
+      # by Nextcloud.
+      - nextcloud:/var/www/html
+      - ./nextcloud/config:/var/www/html/config
+      - ./nextcloud/custom_apps:/var/www/html/custom_apps
+      - ./nextcloud/data:/var/www/html/data
+      - ./nextcloud/themes:/var/www/html/themes
+      # Use the host's timezone inside the container.
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      # Point Nextcloud to the container hosting the database.
+      - MYSQL_HOST=nextcloud-db
+      # List the database names for MySQL. These should not be changed.
+      - MYSQL_DATABASE=nextcloud
+      - MYSQL_USER=nextcloud
+      # Point Nextcloud to the container hosting Redis.
+      - REDIS_HOST=nextcloud-redis
+    # Define the file containing private environment variables.
+    # WARNING: This file should never be committed to git. Copy the template
+    # file and modify the copy.
+    env_file:
+      - nextcloud-private.env
+    # Automatically restart the container unless stopped manually.
+    restart: unless-stopped
+    
+  site:
+    image: klakegg/hugo:latest
+    # Make the service start the Hugo server on startup.
+    command: server
+    depends_on:
+      - proxy
+      - letsencrypt
+    networks:
+      - site
+    volumes:
+      # Point the service to the folder containing the Hugo content.
+      - ./hugo:/src
+      # Use the host's timezone inside the container.
+      - /etc/localtime:/etc/localtime:ro
+    # Expose port 1313, which Hugo runs on by default.
+    ports:
+      - 1313:1313
+    environment:
+      # Tell the reverse proxy to route traffic on port 1313.
+      - VIRTUAL_PORT=1313
+    # Define the file containing private environment variables.
+    # WARNING: This file should never be committed to git. Copy the template
+    # file and modify the copy.
+    env_file:
+      - site-private.env
+    # Automatically restart the container unless stopped manually.
+    restart: unless-stopped
+      
+networks:
+  nextcloud:
+  site:
+    
+volumes:
+  nextcloud:
+  nextcloud-db:
